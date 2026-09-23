@@ -1,0 +1,54 @@
+# Only the data host, for a mangos server you already run (vmangos, cMaNGOS, anything 1.12.1 with
+# Warden off). It hands the iNilla app the game data and pfQuest; your server does the rest.
+#
+#   WOW_DATA_DIR="/path/to/WoW 1.12.1/Data" docker compose -f compose.datahost.yaml up -d
+#
+# or put WOW_DATA_DIR (and the optional settings below) in .env. Then, in the app's Game data
+# screen: http://<this machine>:8099/
+
+name: inilla-datahost
+
+services:
+  datahost:
+    image: inilla-datahost:local
+    build:
+      context: datahost
+    restart: unless-stopped
+    command:
+      - serve
+      - --data
+      - ${WOW_LOCALE:-enUS}=/client/Data
+      - --data
+      - deDE=/client/deDE/Data
+      - --addons
+      - enUS=/opt/inilla/addons/enUS
+      - --addons
+      - deDE=/opt/inilla/addons/deDE
+      - --addons
+      - /addons/all
+      - --addons
+      - enUS=/addons/enUS
+      - --addons
+      - deDE=/addons/deDE
+      - --cache-dir
+      - /state
+    environment:
+      # Empty: open to everyone on the network. Set one for anything but a home LAN.
+      INILLA_DATA_TOKEN: ${INILLA_DATA_TOKEN:-}
+    volumes:
+      - ${WOW_DATA_DIR:?set WOW_DATA_DIR to your 1.12.1 client's Data folder}:/client/Data:ro
+      # Optional: a German 1.12.1 client's Data folder.
+      - ${WOW_DATA_DIR_DEDE:-./docker/empty}:/client/deDE/Data:ro
+      - ./addons:/addons:ro
+      - datahost:/state
+    ports:
+      - "${BIND_ADDR:-0.0.0.0}:${DATAHOST_PORT:-8099}:8099"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8099/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10m
+
+volumes:
+  datahost:

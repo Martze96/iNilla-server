@@ -1,22 +1,37 @@
 //! **inilla-datahost** — hand your own World of Warcraft 1.12.1 `Data` folder to your own iPhone,
-//! once. The iNilla app's setup screen downloads it from here (resumable, SHA-256 verified).
+//! once, with the addons that go with it. The iNilla app's setup screen downloads both from here
+//! (resumable, SHA-256 verified).
 //!
 //! ```text
-//! inilla-datahost serve --data "/games/WoW 1.12.1/Data" --token s3cret
-//!     → http://<this machine>:8099/   (enter it in iNilla's setup, with the token)
+//! inilla-datahost serve --data "/games/WoW 1.12.1/Data"
+//!     → http://<this machine>:8099/   (enter it in iNilla's setup)
+//! inilla-datahost serve --data enUS=/games/enUS/Data --data deDE=/games/deDE/Data \
+//!                       --addons /addons/all --addons deDE=/addons/deDE --token s3cret
+//!     → the same, in two languages, with addons, behind a token
 //! inilla-datahost manifest --data "/games/WoW 1.12.1/Data"
 //!     → prints the manifest (and caches it) without serving
 //! ```
 //!
-//! It serves exactly what the client mounts — the MPQs at the root of `Data/` — and nothing else:
-//! `GET /manifest.json` (names, sizes, SHA-256) and `GET|HEAD /files/<name>` with `Range`, so an
-//! interrupted download resumes. Hashing 5 GB takes a minute or two; the manifest is cached
-//! (`.inilla-manifest.json`, beside the data or in `--cache-dir`) and rebuilt when an archive's
-//! size or mtime changes.
+//! It serves exactly what the client mounts — the MPQs at the root of each `Data/` — and the
+//! addons it was given, nothing else:
 //!
-//! The files are Blizzard's. Serve them only to yourself and people who own the game, keep a token
-//! on, and prefer a LAN or a VPN (Tailscale, WireGuard) to the open internet.
+//! | request | answer |
+//! |---|---|
+//! | `GET /locales.json` | the languages this host has game data for, the first one the default |
+//! | `GET [/<locale>]/manifest.json` | the archives: names, sizes, SHA-256 |
+//! | `GET\|HEAD [/<locale>]/files/<name>` | one archive, with `Range`, so a download resumes |
+//! | `GET [/<locale>]/addons.json` | the addons for that language, every file hashed |
+//! | `GET\|HEAD [/<locale>]/addons/<path>` | one addon file |
+//!
+//! Without a `/<locale>` prefix a request means the first `--data`, so an app that knows only
+//! `/manifest.json` keeps working. Hashing 5 GB takes a minute or two; each manifest is cached
+//! (`.inilla-manifest-<locale>.json`, beside the data or in `--cache-dir`) and rebuilt when an
+//! archive's size or mtime changes.
+//!
+//! The files are Blizzard's. Serve them only to yourself and people who own the game, and prefer
+//! a LAN or a VPN (Tailscale, WireGuard) to the open internet — with a token there.
 
+mod addons;
 mod http;
 mod manifest;
 
@@ -29,6 +44,7 @@ use std::time::UNIX_EPOCH;
 
 use clap::{Parser, Subcommand};
 
+use crate::addons::AddonSet;
 use crate::http::{Head, Request};
 use crate::manifest::Manifest;
 
@@ -41,24 +57,31 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Serve the Data folder.
+    /// Serve the Data folder(s) and addons.
     Serve {
-        /// The client's `Data` folder.
-        #[arg(long, env = "INILLA_DATA_DIR")]
-        data: PathBuf,
+        /// A client's `Data` folder, as `DIR` or `LOCALE=DIR` (e.g. `deDE=/games/de/Data`).
+        /// Repeat for more languages; the first is the default. A folder without archives is
+        /// skipped, so an optional language can stay mounted empty.
+        #[arg(long = "data", required = true)]
+        data: Vec<String>,
+        /// A folder of addons (`<Addon>/<Addon>.toc`), as `DIR` for every language or
+        /// `LOCALE=DIR` for one. Repeatable; later folders replace an addon of the same name.
+        #[arg(long = "addons")]
+        addons: Vec<String>,
         /// Address to listen on.
         #[arg(long, env = "INILLA_DATA_BIND", default_value = "0.0.0.0:8099")]
         bind: String,
-        /// Require `Authorization: Bearer <token>` (or `?token=`).
+        /// Require `Authorization: Bearer <token>` (or `?token=`). Without one the host is open
+        /// to everyone who can reach it: fine on a home LAN, not on the internet.
         #[arg(long, env = "INILLA_DATA_TOKEN")]
         token: Option<String>,
-        /// Serve without a token (a trusted LAN only).
-        #[arg(long)]
+        /// Accepted for compatibility: no token is now simply the default.
+        #[arg(long, hide = true)]
         no_token: bool,
-        /// The client's locale, advertised in the manifest.
+        /// The locale of a `--data` given without one.
         #[arg(long, env = "INILLA_DATA_LOCALE", default_value = "enUS")]
         locale: String,
-        /// Where to cache the manifest, when the Data folder is read-only.
+        /// Where to cache the manifests, when the Data folders are read-only.
         #[arg(long, env = "INILLA_DATA_CACHE_DIR")]
         cache_dir: Option<PathBuf>,
     },
@@ -78,12 +101,13 @@ fn main() {
     let result = match cli.cmd {
         Cmd::Serve {
             data,
+            addons,
             bind,
             token,
-            no_token,
+            no_token: _,
             locale,
             cache_dir,
-        } => serve(&data, &bind, token, no_token, &locale, cache_dir.as_deref()),
+        } => serve(&data, &addons, &bind, token, &locale, cache_dir.as_deref()),
         Cmd::Manifest {
             data,
             locale,
@@ -95,6 +119,17 @@ fn main() {
     if let Err(e) = result {
         eprintln!("inilla-datahost: {e}");
         std::process::exit(1);
+    }
+}
+
+/// `deDE=/path` → `(Some("deDE"), "/path")`; a plain path has no locale. A locale is four ASCII
+/// letters, so a Windows drive (`C:\…`) or a path with `=` further in is still just a path.
+fn split_locale(arg: &str) -> (Option<&str>, &str) {
+    match arg.split_once('=') {
+        Some((l, rest)) if l.len() == 4 && l.chars().all(|c| c.is_ascii_alphabetic()) => {
+            (Some(l), rest)
+        }
+        _ => (None, arg),
     }
 }
 
@@ -136,20 +171,25 @@ fn manifest(dir: &Path, locale: &str, cache_dir: Option<&Path>) -> Result<Manife
             st.missing_expected.join(", ")
         );
     }
-    let cache = cache_dir.unwrap_or(dir).join(".inilla-manifest.json");
+    let cache = cache_dir
+        .unwrap_or(dir)
+        .join(format!(".inilla-manifest-{locale}.json"));
     let fp = fingerprint(dir, locale);
     if let Ok(text) = fs::read_to_string(&cache) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
             if v["fingerprint"].as_str() == Some(fp.as_str()) {
                 if let Ok(m) = serde_json::from_value::<Manifest>(v["manifest"].clone()) {
-                    eprintln!("inilla-datahost: manifest from cache {}", cache.display());
+                    eprintln!(
+                        "inilla-datahost: {locale} manifest from cache {}",
+                        cache.display()
+                    );
                     return Ok(m);
                 }
             }
         }
     }
     eprintln!(
-        "inilla-datahost: hashing {} archives ({:.1} GB)…",
+        "inilla-datahost: hashing {} {locale} archives ({:.1} GB)…",
         st.present.len(),
         st.total_bytes() as f64 / 1e9
     );
@@ -174,44 +214,142 @@ fn manifest(dir: &Path, locale: &str, cache_dir: Option<&Path>) -> Result<Manife
     Ok(m)
 }
 
-struct Host {
+/// One language's game data and addons.
+struct DataSet {
+    locale: String,
     dir: PathBuf,
     manifest: Manifest,
     manifest_json: String,
+    addons: AddonSet,
+}
+
+struct Host {
+    /// The first is the default: what a request without a `/<locale>` prefix gets.
+    sets: Vec<DataSet>,
+    locales_json: String,
     token: Option<String>,
 }
 
+impl Host {
+    /// The data set a path names, and the rest of the path: `/deDE/files/x` → (deDE, `/files/x`).
+    fn route<'a>(&self, path: &'a str) -> (&DataSet, &'a str) {
+        if let Some(rest) = path.strip_prefix('/') {
+            let (first, tail) = rest.split_once('/').unwrap_or((rest, ""));
+            if let Some(set) = self
+                .sets
+                .iter()
+                .find(|s| s.locale.eq_ignore_ascii_case(first))
+            {
+                return (
+                    set,
+                    if tail.is_empty() {
+                        "/"
+                    } else {
+                        &path[first.len() + 1..]
+                    },
+                );
+            }
+        }
+        (&self.sets[0], path)
+    }
+}
+
+fn load(
+    data: &[String],
+    addons: &[String],
+    default_locale: &str,
+    cache_dir: Option<&Path>,
+) -> Result<Vec<DataSet>, String> {
+    let mut sets = Vec::new();
+    for arg in data {
+        let (locale, dir) = split_locale(arg);
+        let locale = locale.unwrap_or(default_locale).to_string();
+        let dir = PathBuf::from(dir);
+        if manifest::status(&dir).present.is_empty() {
+            eprintln!(
+                "inilla-datahost: no archives in {} — {locale} is not offered",
+                dir.display()
+            );
+            continue;
+        }
+        if sets
+            .iter()
+            .any(|s: &DataSet| s.locale.eq_ignore_ascii_case(&locale))
+        {
+            return Err(format!(
+                "two --data folders with archives are both {locale}"
+            ));
+        }
+        let m = manifest(&dir, &locale, cache_dir)?;
+        let addon_dirs: Vec<PathBuf> = addons
+            .iter()
+            .filter_map(|a| match split_locale(a) {
+                (None, d) => Some(PathBuf::from(d)),
+                (Some(l), d) if l.eq_ignore_ascii_case(&locale) => Some(PathBuf::from(d)),
+                _ => None,
+            })
+            .collect();
+        let addons = addons::scan(&addon_dirs, &locale)?;
+        sets.push(DataSet {
+            manifest_json: serde_json::to_string(&m).map_err(|e| e.to_string())?,
+            manifest: m,
+            locale,
+            dir,
+            addons,
+        });
+    }
+    if sets.is_empty() {
+        return Err("no --data folder holds 1.12.1 archives".into());
+    }
+    Ok(sets)
+}
+
+fn locales_json(sets: &[DataSet]) -> String {
+    serde_json::json!({
+        "format": 1,
+        "default": sets[0].locale,
+        "locales": sets.iter().map(|s| serde_json::json!({
+            "locale": s.locale,
+            "path": format!("{}/", s.locale),
+            "bytes": s.manifest.total_bytes(),
+            "addons": s.addons.count,
+        })).collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
 fn serve(
-    dir: &Path,
+    data: &[String],
+    addons: &[String],
     bind: &str,
     token: Option<String>,
-    no_token: bool,
     locale: &str,
     cache_dir: Option<&Path>,
 ) -> Result<(), String> {
     let token = token.filter(|t| !t.trim().is_empty());
-    if token.is_none() && !no_token {
-        return Err(
-            "set --token (or $INILLA_DATA_TOKEN), or pass --no-token on a trusted LAN".into(),
-        );
-    }
-    let m = manifest(dir, locale, cache_dir)?;
+    let sets = load(data, addons, locale, cache_dir)?;
     let host = Arc::new(Host {
-        dir: dir.to_path_buf(),
-        manifest_json: serde_json::to_string(&m).map_err(|e| e.to_string())?,
-        manifest: m,
+        locales_json: locales_json(&sets),
+        sets,
         token,
     });
     let listener = TcpListener::bind(bind).map_err(|e| format!("cannot listen on {bind}: {e}"))?;
+    for s in &host.sets {
+        eprintln!(
+            "inilla-datahost: {} — {} archives ({:.1} GB) from {}, {} addon(s)",
+            s.locale,
+            s.manifest.files.len(),
+            s.manifest.total_bytes() as f64 / 1e9,
+            s.dir.display(),
+            s.addons.count
+        );
+    }
     eprintln!(
-        "inilla-datahost: serving {} archives ({:.1} GB) from {} on http://{bind}/{}",
-        host.manifest.files.len(),
-        host.manifest.total_bytes() as f64 / 1e9,
-        dir.display(),
+        "inilla-datahost: serving on http://{bind}/  {}",
         if host.token.is_some() {
-            "  (token required)"
+            "(token required)"
         } else {
-            "  (NO token)"
+            "(open: anyone who can reach this port can download)"
         }
     );
     http::serve(listener, move |req, stream| handle(&host, req, stream));
@@ -228,41 +366,67 @@ fn handle(host: &Host, req: Request, w: &mut TcpStream) {
         let _ = http::respond_text(w, 405, "GET or HEAD", false);
         return;
     }
-    match req.path.as_str() {
-        "/" => {
-            let _ = http::respond_text(
-                w,
-                200,
-                "inilla-datahost: enter this address (and the token) in iNilla → Game data.\n",
-                head_only,
-            );
-        }
+    if req.path == "/" {
+        let _ = http::respond_text(
+            w,
+            200,
+            "inilla-datahost: enter this address in iNilla → Game data.\n",
+            head_only,
+        );
+        return;
+    }
+    if !authorized {
+        let _ = http::respond_text(w, 401, "token required", head_only);
+        return;
+    }
+    if req.path == "/locales.json" {
+        let _ = http::respond(
+            w,
+            200,
+            "application/json",
+            host.locales_json.as_bytes(),
+            head_only,
+        );
+        return;
+    }
+    let (set, path) = host.route(&req.path);
+    match path {
         "/manifest.json" => {
-            if !authorized {
-                let _ = http::respond_text(w, 401, "token required", head_only);
-                return;
-            }
-            eprintln!("{} manifest", req.peer);
+            eprintln!("{} {} manifest", req.peer, set.locale);
             let _ = http::respond(
                 w,
                 200,
                 "application/json",
-                host.manifest_json.as_bytes(),
+                set.manifest_json.as_bytes(),
+                head_only,
+            );
+        }
+        "/addons.json" => {
+            eprintln!("{} {} addons", req.peer, set.locale);
+            let _ = http::respond(
+                w,
+                200,
+                "application/json",
+                set.addons.manifest_json.as_bytes(),
                 head_only,
             );
         }
         p if p.starts_with("/files/") => {
-            if !authorized {
-                let _ = http::respond_text(w, 401, "token required", head_only);
-                return;
-            }
             let name = &p["/files/".len()..];
             // Only what the manifest lists — never a path into the rest of the disk.
-            let Some(file) = host.manifest.files.iter().find(|f| f.name == name) else {
+            let Some(file) = set.manifest.files.iter().find(|f| f.name == name) else {
                 let _ = http::respond_text(w, 404, "not an archive this host serves", head_only);
                 return;
             };
-            send_file(&host.dir.join(&file.name), file.size, &req, head_only, w);
+            send_file(&set.dir.join(&file.name), file.size, &req, head_only, w);
+        }
+        p if p.starts_with("/addons/") => {
+            let rel = &p["/addons/".len()..];
+            let Some((path, size)) = set.addons.files.get(rel) else {
+                let _ = http::respond_text(w, 404, "not an addon file this host serves", head_only);
+                return;
+            };
+            send_file(path, *size, &req, head_only, w);
         }
         _ => {
             let _ = http::respond_text(w, 404, "not found", head_only);
@@ -272,7 +436,7 @@ fn handle(host: &Host, req: Request, w: &mut TcpStream) {
 
 fn send_file(path: &Path, size: u64, req: &Request, head_only: bool, w: &mut TcpStream) {
     let Ok(mut f) = fs::File::open(path) else {
-        let _ = http::respond_text(w, 500, "the archive vanished", head_only);
+        let _ = http::respond_text(w, 500, "the file vanished", head_only);
         return;
     };
     let range = req.header("range").map(|r| http::parse_range(r, size));
@@ -317,14 +481,22 @@ fn send_file(path: &Path, size: u64, req: &Request, head_only: bool, w: &mut Tcp
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let from = if start > 0 {
-        format!(" (from {start})")
-    } else {
-        String::new()
-    };
-    eprintln!("{} {name} {len}{from}", req.peer);
+    // Addon files are many and small; only the archives are worth a line each.
+    let loud = len > 1_000_000;
+    if loud {
+        let from = if start > 0 {
+            format!(" (from {start})")
+        } else {
+            String::new()
+        };
+        eprintln!("{} {name} {len}{from}", req.peer);
+    }
     match http::copy_n(&mut f, w, len) {
-        Ok(sent) if sent == len => eprintln!("{} {name} done", req.peer),
+        Ok(sent) if sent == len => {
+            if loud {
+                eprintln!("{} {name} done", req.peer);
+            }
+        }
         Ok(sent) => eprintln!("{} {name} stopped at {sent} of {len}", req.peer),
         Err(e) => eprintln!("{} {name} dropped: {e}", req.peer),
     }
@@ -337,22 +509,30 @@ mod tests {
     use crate::manifest::REQUIRED;
     use std::io::{Read, Write};
 
-    /// A live host on an ephemeral port over a folder of fake archives.
-    fn host(name: &str, token: Option<&str>) -> (std::net::SocketAddr, PathBuf) {
+    fn data_dir(name: &str) -> PathBuf {
         let dir = tmp(name);
         fill(&dir, REQUIRED);
         fill(&dir, &["patch-2.MPQ", "base.MPQ", "realmlist.wtf"]);
-        let m = manifest(&dir, "enUS", None).unwrap();
+        dir
+    }
+
+    /// A live host on an ephemeral port.
+    fn host_with(data: &[String], addons: &[String], token: Option<&str>) -> std::net::SocketAddr {
+        let sets = load(data, addons, "enUS", None).unwrap();
         let host = Arc::new(Host {
-            dir: dir.clone(),
-            manifest_json: serde_json::to_string(&m).unwrap(),
-            manifest: m,
+            locales_json: locales_json(&sets),
+            sets,
             token: token.map(str::to_string),
         });
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || http::serve(listener, move |r, s| handle(&host, r, s)));
-        (addr, dir)
+        addr
+    }
+
+    fn host(name: &str, token: Option<&str>) -> (std::net::SocketAddr, PathBuf) {
+        let dir = data_dir(name);
+        (host_with(&[dir.display().to_string()], &[], token), dir)
     }
 
     /// One raw request → (status, headers, body).
@@ -368,10 +548,19 @@ mod tests {
     }
 
     #[test]
-    fn the_manifest_and_files_need_the_token() {
+    fn locale_prefixes_are_four_letters() {
+        assert_eq!(split_locale("deDE=/x"), (Some("deDE"), "/x"));
+        assert_eq!(split_locale("/games/Data"), (None, "/games/Data"));
+        assert_eq!(split_locale("C:=x"), (None, "C:=x"));
+        assert_eq!(split_locale("/a=b/Data"), (None, "/a=b/Data"));
+    }
+
+    #[test]
+    fn with_a_token_only_the_hint_is_open() {
         let (addr, _) = host("auth", Some("s3cret"));
         assert_eq!(get(addr, "GET / HTTP/1.1").0, 200);
         assert_eq!(get(addr, "GET /manifest.json HTTP/1.1").0, 401);
+        assert_eq!(get(addr, "GET /locales.json HTTP/1.1").0, 401);
         assert_eq!(get(addr, "GET /files/dbc.MPQ HTTP/1.1").0, 401);
         assert_eq!(get(addr, "GET /manifest.json?token=wrong HTTP/1.1").0, 401);
         let (status, _, body) = get(
@@ -391,6 +580,13 @@ mod tests {
             .iter()
             .all(|f| f.name != "base.MPQ" && f.name != "realmlist.wtf"));
         assert_eq!(get(addr, "GET /files/dbc.MPQ?token=s3cret HTTP/1.1").0, 200);
+    }
+
+    #[test]
+    fn without_a_token_the_host_is_open() {
+        let (addr, _) = host("open", None);
+        assert_eq!(get(addr, "GET /manifest.json HTTP/1.1").0, 200);
+        assert_eq!(get(addr, "GET /files/dbc.MPQ HTTP/1.1").0, 200);
     }
 
     #[test]
@@ -418,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn nothing_outside_the_manifest_is_served() {
+    fn nothing_outside_the_manifests_is_served() {
         let (addr, _) = host("escape", None);
         assert_eq!(get(addr, "GET /files/realmlist.wtf HTTP/1.1").0, 404);
         assert_eq!(get(addr, "GET /files/base.MPQ HTTP/1.1").0, 404);
@@ -427,10 +623,61 @@ mod tests {
             404
         );
         assert_eq!(
-            get(addr, "GET /files/.inilla-manifest.json HTTP/1.1").0,
+            get(addr, "GET /files/.inilla-manifest-enUS.json HTTP/1.1").0,
             404
         );
+        assert_eq!(get(addr, "GET /addons/..%2Fdbc.MPQ HTTP/1.1").0, 404);
         assert_eq!(get(addr, "POST /manifest.json HTTP/1.1").0, 405);
+    }
+
+    #[test]
+    fn two_languages_and_their_addons() {
+        let en = data_dir("lang-en");
+        let de = data_dir("lang-de");
+        let missing = tmp("lang-fr-empty");
+        let all = tmp("addons-all");
+        fs::create_dir_all(all.join("Util")).unwrap();
+        fs::write(all.join("Util/Util.toc"), "## Version: 1\n").unwrap();
+        let de_addons = tmp("addons-de");
+        fs::create_dir_all(de_addons.join("pfQuest/db/deDE")).unwrap();
+        fs::write(de_addons.join("pfQuest/pfQuest.toc"), "## Version: 7.0.1\n").unwrap();
+        fs::write(de_addons.join("pfQuest/db/deDE/quests.lua"), "Quests").unwrap();
+        let addr = host_with(
+            &[
+                en.display().to_string(),
+                format!("deDE={}", de.display()),
+                format!("frFR={}", missing.display()),
+            ],
+            &[
+                all.display().to_string(),
+                format!("deDE={}", de_addons.display()),
+            ],
+            None,
+        );
+        let (_, _, body) = get(addr, "GET /locales.json HTTP/1.1");
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["default"], "enUS");
+        let locales: Vec<&str> = v["locales"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["locale"].as_str().unwrap())
+            .collect();
+        assert_eq!(locales, ["enUS", "deDE"], "an empty folder is not offered");
+        let (_, _, body) = get(addr, "GET /deDE/manifest.json HTTP/1.1");
+        let m: Manifest = serde_json::from_slice(&body).unwrap();
+        assert_eq!(m.locale.as_deref(), Some("deDE"));
+        assert_eq!(get(addr, "GET /dede/files/dbc.MPQ HTTP/1.1").0, 200);
+        let (_, _, body) = get(addr, "GET /deDE/addons.json HTTP/1.1");
+        let a: addons::AddonManifest = serde_json::from_slice(&body).unwrap();
+        let names: Vec<&str> = a.addons.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["pfQuest", "Util"]);
+        let (status, _, body) = get(addr, "GET /deDE/addons/pfQuest/db/deDE/quests.lua HTTP/1.1");
+        assert_eq!((status, body.as_slice()), (200, b"Quests".as_slice()));
+        let (_, _, body) = get(addr, "GET /addons.json HTTP/1.1");
+        let a: addons::AddonManifest = serde_json::from_slice(&body).unwrap();
+        assert_eq!(a.addons.len(), 1, "English gets only the shared addons");
+        assert_eq!(get(addr, "GET /addons/pfQuest/pfQuest.toc HTTP/1.1").0, 404);
     }
 
     #[test]
@@ -439,7 +686,7 @@ mod tests {
         let cache = tmp("cache-dir");
         fill(&dir, REQUIRED);
         let first = manifest(&dir, "enUS", Some(&cache)).unwrap();
-        assert!(cache.join(".inilla-manifest.json").exists());
+        assert!(cache.join(".inilla-manifest-enUS.json").exists());
         assert_eq!(manifest(&dir, "enUS", Some(&cache)).unwrap(), first);
         fs::write(dir.join("dbc.MPQ"), "changed, and longer than before").unwrap();
         let second = manifest(&dir, "enUS", Some(&cache)).unwrap();

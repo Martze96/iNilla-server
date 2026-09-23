@@ -65,6 +65,34 @@ docker compose restart mangosd                          # mmaps turn on because 
 
 Also set `EXTRACT_MMAPS=1` in `.env`, so a fresh machine builds them too.
 
+## Addons for the app
+
+The data host hands the app **pfQuest** (English and German builds, from the image) and whatever
+you put in `addons/` (see [addons/README.md](../addons/README.md)). The app installs them with the
+game data, and **Install / update addons** on its Game data screen fetches changes later. After
+changing `addons/`, run `docker compose restart datahost`.
+
+## German
+
+The server side is German already: vmangos' world database carries German quest texts, items,
+creatures and spells, and it sends them to every client that logs in as German. The app logs in
+in the language of its game data, so German needs a German 1.12.1 client's `Data` folder on the
+data host:
+
+1. Build a German 1.12.1 client on a Windows PC: install the German 1.1.2 client
+   (`WoW-1.1.2.4125-deDE.iso`), then run the German `1.12.0` patch and the `1.12.0 → 1.12.1` patch
+   on it. Blizzard's installers and patchers run on Windows 10 and 11.
+2. In `.env`, set `WOW_DATA_DIR_DEDE` to that client's `Data` folder, then run
+   `docker compose up -d`. The data host hashes it once (a minute or two) and then offers
+   **Deutsch** next to English, with pfQuest's German build.
+3. On the phone, **Game data** → **Check server** → **Deutsch** → **Download**. The phone keeps one
+   language at a time, so switching downloads that language's archives in place of the others.
+
+The realm keeps its map data from the English client; it has no language.
+
+The app's German is new and untested: it is built to read a German client's text, but nobody has
+played it yet. Report what shows up in English, or empty.
+
 ## Backups
 
 The world database can be rebuilt at any time. Accounts (`realmd`) and characters (`characters`)
@@ -128,6 +156,8 @@ docker compose exec mangosd ls /vmangos/logs   # Server.log, DBErrors.log, Chat.
 
 **The app cannot reach the server.** Open `http://<REALM_ADDRESS>:8099/` in Safari on the phone.
 
+- If the app says the server refused the token, the data host has `INILLA_DATA_TOKEN` set: enter
+  it on the Game data screen, or empty it in `.env` and run `docker compose up -d`.
 - If Safari gets no answer, the machine is not reachable. Check that the phone is on the same
   network (not a guest Wi-Fi), that `BIND_ADDR` is `0.0.0.0`, and the firewall:
   - **Windows** (Docker Desktop): the firewall rule is for the program, not the port. The

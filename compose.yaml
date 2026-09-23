@@ -127,17 +127,39 @@ services:
       # Loading the world takes a minute or two.
       start_period: 5m
 
+  # The game data and addons for the app. English from WOW_DATA_DIR; German too when
+  # WOW_DATA_DIR_DEDE points at a German 1.12.1 client (the empty default offers none). pfQuest
+  # comes built in for both languages; addons/ adds your own (see addons/README.md).
   datahost:
     image: inilla-datahost:local
     build:
       context: datahost
     restart: unless-stopped
-    command: ["serve", "--data", "/client/Data", "--cache-dir", "/state"]
+    command:
+      - serve
+      - --data
+      - ${WOW_LOCALE:-enUS}=/client/Data
+      - --data
+      - deDE=/client/deDE/Data
+      - --addons
+      - enUS=/opt/inilla/addons/enUS
+      - --addons
+      - deDE=/opt/inilla/addons/deDE
+      - --addons
+      - /addons/all
+      - --addons
+      - enUS=/addons/enUS
+      - --addons
+      - deDE=/addons/deDE
+      - --cache-dir
+      - /state
     environment:
-      INILLA_DATA_TOKEN: ${INILLA_DATA_TOKEN:?set INILLA_DATA_TOKEN in .env}
-      INILLA_DATA_LOCALE: ${WOW_LOCALE:-enUS}
+      # Empty: open to everyone on the network, the easy way on a home LAN.
+      INILLA_DATA_TOKEN: ${INILLA_DATA_TOKEN:-}
     volumes:
       - ${WOW_DATA_DIR:?set WOW_DATA_DIR in .env}:/client/Data:ro
+      - ${WOW_DATA_DIR_DEDE:-./docker/empty}:/client/deDE/Data:ro
+      - ./addons:/addons:ro
       - datahost:/state
     ports:
       - "${BIND_ADDR:-0.0.0.0}:${DATAHOST_PORT:-8099}:8099"

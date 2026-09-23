@@ -10,7 +10,7 @@ network backend: everything the app needs from a machine on your LAN.
 |---|---|---|
 | `realmd` | 3724 | logon: the server profile's host and port |
 | `mangosd` | 8085 | the world: realmd hands the app `REALM_ADDRESS:8085` |
-| `datahost` | 8099 | the one-time download of the game's `Data` folder (5.4 GB, resumable, SHA-256 verified) |
+| `datahost` | 8099 | the one-time download of the game's `Data` folder (5.4 GB, resumable, SHA-256 verified), in English and optionally German, with the addons that go with it (pfQuest built in) |
 | `db` | — | MariaDB for vmangos. Never published. |
 | `db-init`, `extract` | — | one-shot jobs on every `up`: database setup/upgrades and map extraction. They exit when done. |
 
@@ -39,8 +39,10 @@ In `.env`, set:
 
 - **`WOW_DATA_DIR`** to your client's `Data` folder.
 - **`REALM_ADDRESS`** to this machine's LAN IP.
-- **The three secrets** (`DB_ROOT_PASSWORD`, `DB_PASSWORD`, `INILLA_DATA_TOKEN`). `openssl rand -hex 16`
-  makes good database passwords. The data token is typed once on the phone, so keep it short.
+- **The two database passwords** (`DB_ROOT_PASSWORD`, `DB_PASSWORD`). `openssl rand -hex 16`
+  makes good ones.
+- `INILLA_DATA_TOKEN` can stay empty on a home network: the phone then needs no token. Set one
+  before the data host is reachable from the internet.
 
 Then start the stack:
 
@@ -71,10 +73,10 @@ With the phone on the same Wi-Fi:
 
 1. **Add the server.** In iNilla, go to Servers → Add:
    - host: your `REALM_ADDRESS`, port `3724`, server software **vmangos**
-   - under **Advanced**, the game-data URL `http://<REALM_ADDRESS>:8099/` and your
-     `INILLA_DATA_TOKEN`, so the setup screen fills them in for you
-2. **Get the game data, once.** On the setup screen, open **Game data**, enter the URL and token,
-   tap **Check server**, then **Download**. It is 5.4 GB. Keep the app open and the screen on. An
+2. **Get the game data, once.** On the setup screen, open **Game data**. The URL is filled in
+   from the server you added (`http://<REALM_ADDRESS>:8099/`); the token field stays empty unless
+   you set one. Tap **Check server**, pick the language if the server offers more than one, then
+   **Download**. pfQuest installs right after the archives. It is 5.4 GB. Keep the app open and the screen on. An
    interrupted download resumes where it stopped, and every file is hash-checked before use.
    (You can also skip the download and copy the `Data` folder in with Finder or the Files app.)
 3. **Allow Local Network access** when iOS asks. Without it, the app cannot reach anything on your LAN.
@@ -104,6 +106,18 @@ Accounts, GM commands, backups, updating vmangos, turning on mmaps and troublesh
 in **[docs/OPERATIONS.md](docs/OPERATIONS.md)**. How the pieces fit together, and why, is in
 **[docs/DESIGN.md](docs/DESIGN.md)**.
 
+## Only the data host, for a server you already run
+
+Any 1.12.1 core with Warden off works with the app (vmangos, cMaNGOS). To give its players the
+game data and pfQuest without this repository's realm, run the data host alone:
+
+```sh
+WOW_DATA_DIR="/path/to/WoW 1.12.1/Data" docker compose -f compose.datahost.yaml up -d
+```
+
+It needs nothing else from this stack. `WOW_DATA_DIR_DEDE`, `INILLA_DATA_TOKEN` and the
+`addons/` folder work the same as in the full stack.
+
 ## Layout
 
 | path | what |
@@ -112,13 +126,16 @@ in **[docs/OPERATIONS.md](docs/OPERATIONS.md)**. How the pieces fit together, an
 | `.env.example` | every setting, documented. Copy it to `.env`. |
 | `config/` | overrides for `mangosd.conf` and `realmd.conf` |
 | `docker/vmangos/` | the vmangos image: `Dockerfile` (compile at a pinned commit, world DB snapshot, runtime) and `bin/` (the roles: `inilla-db-init`, `inilla-extract`, `inilla-realmd`, `inilla-mangosd`, plus `vmangos-console`) |
-| `datahost/` | `inilla-datahost`, the Rust service that serves the `Data` folder to the app |
+| `datahost/` | `inilla-datahost`, the Rust service that serves the `Data` folder and the addons to the app |
+| `addons/` | your own addons for the app, per language (see [addons/README.md](addons/README.md)) |
+| `compose.datahost.yaml` | only the data host, beside a server you already run |
 | `docs/` | operations and design notes |
 
 ## A word on copyright
 
 The archives in your `Data` folder belong to Blizzard. Serving your own copy to your own phone is
 between you and your copy of the game. Serving it to anyone else means distributing Blizzard's
-files, so keep the token on and share it only with people who own the game. iNilla is an
+files, so only share it with people who own the game, and set a token before the data host is
+reachable from outside your home. iNilla is an
 independent fan project, not affiliated with or endorsed by Blizzard Entertainment. vmangos is
 GPLv2 and is built unmodified from its upstream source. Our own code is MIT OR Apache-2.0.

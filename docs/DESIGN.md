@@ -112,11 +112,21 @@ TTY, no `docker attach`, and no SOAP or RA account to bootstrap first.
 
 | request | answer |
 |---|---|
-| `GET /` | a one-line hint, no token needed (also the health check) |
-| `GET /manifest.json` | `{"format":1,"build":5875,"locale":"enUS","files":[{"name","size","sha256"}]}` |
-| `GET\|HEAD /files/<name>` | the archive. `Range: bytes=a-b` → `206`, so an interrupted download resumes |
+| `GET /` | a one-line hint, always open (also the health check) |
+| `GET /locales.json` | `{"default":"enUS","locales":[{"locale","path":"deDE/","bytes","addons"}]}` |
+| `GET [/<locale>]/manifest.json` | `{"format":1,"build":5875,"locale":"enUS","files":[{"name","size","sha256"}]}` |
+| `GET\|HEAD [/<locale>]/files/<name>` | the archive. `Range: bytes=a-b` → `206`, so an interrupted download resumes |
+| `GET [/<locale>]/addons.json` | `{"format":1,"locale","addons":[{"name","version","files":[{"path","size","sha256"}]}]}` |
+| `GET\|HEAD [/<locale>]/addons/<path>` | one addon file |
 
-Everything except `/` needs `Authorization: Bearer <token>` (or `?token=`). It serves only the
+Without a `/<locale>` prefix a request means the first `--data`, so an app that only knows
+`/manifest.json` still works. A `--data` folder with no archives is skipped, which is how the
+optional German one stays mounted empty. Addons come from `--addons` folders, for every language or
+one: the image's pfQuest builds, then `addons/all`, `addons/<locale>`; a later folder's addon
+replaces an earlier one of the same name.
+
+With `INILLA_DATA_TOKEN` set, everything except `/` needs `Authorization: Bearer <token>` (or
+`?token=`); empty, the host is open, which is the easy way on a home network. It serves only the
 archives the client mounts (the eleven required ones plus `patch-?.MPQ` and `speech2.MPQ`), by
 name from the manifest, never a path. Repack extras such as `base.MPQ` and `backup.MPQ` are left
 out, because the client never opens them. The client refuses a manifest whose `format` or `build`
@@ -124,7 +134,7 @@ it does not know, or one that lacks a required archive, so a change to this shap
 app too. `datahost/src/manifest.rs` and the client's `data` module have to agree.
 
 Hashing 5.4 GB takes about 30 seconds from a Docker Desktop bind mount. The result is cached in the
-`datahost` volume (`.inilla-manifest.json`), keyed by every archive's name, size and mtime.
+`datahost` volume (`.inilla-manifest-<locale>.json`), keyed by every archive's name, size and mtime.
 
 It was checked against the app's own download engine (the client's `data::download` over the same
 `ureq` fetcher): the manifest is accepted, a wrong token gets 401, a download paused at 300 MB resumes
@@ -135,7 +145,7 @@ mid-file, and all 12 archives verify.
 - Published: 3724, 8085, 8099, on `BIND_ADDR` (default all interfaces, because the phone is on the LAN).
 - Not published: MariaDB. Its root and `mangos` passwords come from `.env`, and `db-init` resets the
   `mangos` password to match `.env` on every run.
-- The data host is plain HTTP with a token, which is fine on a home LAN. For the internet, put it
+- The data host is plain HTTP, open by default, which is fine on a home LAN. For the internet, put it
   behind HTTPS (the app speaks both) or reach it over a VPN such as Tailscale or WireGuard, and do
   not forward 8099 unprotected. Forwarding 3724 and 8085 to play from outside also needs
   `REALM_ADDRESS` to be the public address, or the app's world-host override on the phone.
