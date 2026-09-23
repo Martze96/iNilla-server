@@ -76,8 +76,9 @@ With the phone on the same Wi-Fi:
 2. **Get the game data, once.** On the setup screen, open **Game data**. The URL is filled in
    from the server you added (`http://<REALM_ADDRESS>:8099/`); the token field stays empty unless
    you set one. Tap **Check server**, pick the language if the server offers more than one, then
-   **Download**. pfQuest installs right after the archives. It is 5.4 GB. Keep the app open and the screen on. An
-   interrupted download resumes where it stopped, and every file is hash-checked before use.
+   **Download**. It is 5.4 GB, and pfQuest installs right after it. Keep the app open and the
+   screen on. An interrupted download resumes where it stopped, and every file is hash-checked
+   before use.
    (You can also skip the download and copy the `Data` folder in with Finder or the Files app.)
 3. **Allow Local Network access** when iOS asks. Without it, the app cannot reach anything on your LAN.
 4. **Log in** with the account from above. The realm is listed as `REALM_NAME`.
