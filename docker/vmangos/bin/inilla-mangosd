@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# mangosd: the world server (port 8085). Config = upstream defaults + this stack + config/mangosd.conf.
+#
+# The console reads commands from a FIFO instead of a terminal, so `vmangos-console` can drive it
+# from `docker compose exec` (account creation, GM levels, announcements) with no TTY attached.
+set -euo pipefail
+INILLA_ROLE=mangosd
+. /usr/local/bin/inilla-lib.sh
+check_db_password
+
+DATA=/vmangos/data
+[ -d "$DATA/5875/dbc" ] && [ -d "$DATA/maps" ] ||
+    die "no server data in $DATA — the extract service has to finish first (docker compose logs extract)"
+
+conf=/run/vmangos/mangosd.conf
+cp /opt/vmangos/etc/mangosd.conf.dist "$conf"
+conf_set "$conf" LoginDatabase.Info "$(db_info "$DB_REALMD")"
+conf_set "$conf" WorldDatabase.Info "$(db_info "$DB_WORLD")"
+conf_set "$conf" CharacterDatabase.Info "$(db_info "$DB_CHARACTERS")"
+conf_set "$conf" LogsDatabase.Info "$(db_info "$DB_LOGS")"
+conf_set "$conf" DataDir "\"$DATA/\""
+conf_set "$conf" LogsDir '"/vmangos/logs"'
+conf_set "$conf" HonorDir '"/vmangos/logs/"'
+conf_set "$conf" BindIP '"0.0.0.0"'
+conf_set "$conf" WorldServerPort 8085
+conf_set "$conf" RealmID 1
+conf_set "$conf" Console.Enable 1
+conf_set "$conf" GameType "$(realm_type_id)"
+# The iNilla client (benilla) does not implement Warden; a Warden-enabled server drops it.
+conf_set "$conf" Warden.WinEnabled 0
+conf_set "$conf" Warden.OSXEnabled 0
+
+# vmaps and mmaps are on exactly when they were extracted: vmangos refuses to start with mmaps
+# enabled and none on disk, and silently runs without line of sight when vmaps are missing.
+vmaps=0
+mmaps=0
+compgen -G "$DATA/vmaps/*.vmtree" >/dev/null && vmaps=1
+compgen -G "$DATA/mmaps/*.mmap" >/dev/null && mmaps=1
+conf_set "$conf" vmap.enableLOS "$vmaps"
+conf_set "$conf" vmap.enableHeight "$vmaps"
+conf_set "$conf" vmap.enableIndoorCheck "$vmaps"
+conf_set "$conf" mmap.enabled "$mmaps"
+log "vmaps $([ "$vmaps" = 1 ] && echo on || echo off), mmaps $([ "$mmaps" = 1 ] && echo on || echo off)"
+
+conf_apply_overrides "$conf" /config/mangosd.conf
+
+wait_for_db "$DB_USER" "$DB_PASSWORD"
+
+# Holding the FIFO open read-write means mangosd never sees EOF on stdin (which would shut the
+# world down) and a writer never blocks. Everything mangosd prints also lands in console.log, which
+# vmangos-console reads the answer from.
+fifo=/run/vmangos/console.fifo
+[ -p "$fifo" ] || { rm -f "$fifo" && mkfifo -m 0600 "$fifo"; }
+exec 3<>"$fifo"
+: >/run/vmangos/console.log
+exec mangosd -c "$conf" <&3 > >(exec tee -a /run/vmangos/console.log) 2>&1

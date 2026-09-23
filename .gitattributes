@@ -1,0 +1,6 @@
+# Everything a Linux container reads (scripts, configs, Dockerfiles, compose) must keep LF endings,
+# even in a Windows checkout with core.autocrlf=true: a CRLF shebang or config line breaks inside
+# the container.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.png binary

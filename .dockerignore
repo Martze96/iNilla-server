@@ -1,0 +1,5 @@
+# The build contexts are small on purpose; keep secrets and build output out of them.
+.git
+.env
+**/target
+docs

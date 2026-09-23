@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# vmangos-console <command…> — run one command on the mangosd console and print its answer.
+#
+#   docker compose exec mangosd vmangos-console account create NAME PASSWORD
+#   docker compose exec mangosd vmangos-console account set gmlevel NAME 6
+#   docker compose exec mangosd vmangos-console announce Restart in 5 minutes
+#
+# Without arguments, reads one command per line from stdin.
+set -euo pipefail
+fifo=/run/vmangos/console.fifo
+out=/run/vmangos/console.log
+
+[ -p "$fifo" ] || { echo "vmangos-console: mangosd's console is not running in this container" >&2; exit 1; }
+
+run() {
+    local cmd="$1" i
+    # mangosd's output is appended (O_APPEND) to $out, so after truncating it the answer to this
+    # command starts at byte 0. The console prints its `mangos>` prompt when the command is done.
+    : >"$out"
+    printf '%s\n' "$cmd" >"$fifo"
+    for i in $(seq 1 150); do
+        sleep 0.1
+        grep -q 'mangos>' "$out" && break
+    done
+    sed -e 's/mangos>//g' "$out" | sed -e '/^[[:space:]]*$/d'
+    grep -q 'mangos>' "$out" || echo "vmangos-console: no prompt after 15 s — is the world still loading?" >&2
+}
+
+if [ $# -gt 0 ]; then
+    run "$*"
+else
+    while IFS= read -r line; do
+        [ -n "$line" ] && run "$line"
+    done
+fi

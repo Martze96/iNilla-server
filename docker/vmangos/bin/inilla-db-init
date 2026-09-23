@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# db-init: make the database ready for realmd and mangosd, then exit. Safe to run on every start.
+#
+#   1. the four databases and the server's own user (password kept in step with .env)
+#   2. the vmangos release dump, imported into any database that is still empty
+#   3. the core's migrations that the database has not seen yet
+#   4. the realm row realmd hands to clients (name, address, port, type), from .env
+set -euo pipefail
+INILLA_ROLE=db-init
+. /usr/local/bin/inilla-lib.sh
+
+: "${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD is not set}"
+: "${REALM_NAME:=iNilla}"
+: "${REALM_ADDRESS:?REALM_ADDRESS is not set — the LAN address of this machine, e.g. 192.168.1.20}"
+: "${REALM_PORT:=8085}"
+check_db_password
+
+SQL_DIR=/opt/vmangos/sql
+root_sql() {
+    mariadb --host="$DB_HOST" --port="$DB_PORT" --user=root --password="$DB_ROOT_PASSWORD" \
+        --batch --skip-column-names "$@"
+}
+
+wait_for_db root "$DB_ROOT_PASSWORD"
+
+# ---- 1. databases and user ----------------------------------------------------------------------
+root_sql <<SQL
+CREATE DATABASE IF NOT EXISTS \`$DB_REALMD\`     DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE DATABASE IF NOT EXISTS \`$DB_WORLD\`      DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE DATABASE IF NOT EXISTS \`$DB_CHARACTERS\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE DATABASE IF NOT EXISTS \`$DB_LOGS\`       DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE USER IF NOT EXISTS '$DB_USER'@'%' IDENTIFIED BY '$DB_PASSWORD';
+ALTER USER '$DB_USER'@'%' IDENTIFIED BY '$DB_PASSWORD';
+GRANT ALL PRIVILEGES ON \`$DB_REALMD\`.*     TO '$DB_USER'@'%';
+GRANT ALL PRIVILEGES ON \`$DB_WORLD\`.*      TO '$DB_USER'@'%';
+GRANT ALL PRIVILEGES ON \`$DB_CHARACTERS\`.* TO '$DB_USER'@'%';
+GRANT ALL PRIVILEGES ON \`$DB_LOGS\`.*       TO '$DB_USER'@'%';
+FLUSH PRIVILEGES;
+SQL
+log "databases and user '$DB_USER' ready"
+
+# ---- 2. release dump ----------------------------------------------------------------------------
+# database  dump inside db.zip       migration suffix
+DBS=(
+    "$DB_REALMD      mysql-dump/logon.sql       logon"
+    "$DB_WORLD       mysql-dump/mangos.sql      world"
+    "$DB_CHARACTERS  mysql-dump/characters.sql  characters"
+    "$DB_LOGS        mysql-dump/logs.sql        logs"
+)
+
+for row in "${DBS[@]}"; do
+    read -r db dump _ <<<"$row"
+    tables="$(root_sql -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '$db'")"
+    if [ "$tables" != 0 ]; then
+        continue
+    fi
+    log "importing $db from $(basename "$(cat "$SQL_DIR/db.url")") ($dump)…"
+    unzip -p "$SQL_DIR/db.zip" "$dump" | root_sql "$db"
+    log "imported $db ($(root_sql -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '$db'") tables)"
+done
+
+# ---- 3. migrations ------------------------------------------------------------------------------
+# Every vmangos migration records itself in its database's `migrations` table and skips itself when
+# already there, so applying the missing ones in order is all an upgrade takes.
+for row in "${DBS[@]}"; do
+    read -r db _ suffix <<<"$row"
+    declare -A have=()
+    while read -r id; do
+        [ -n "$id" ] && have["$id"]=1
+    done < <(root_sql -e 'SELECT id FROM migrations' "$db" 2>/dev/null || true)
+
+    applied=0
+    declare -A known=()
+    for file in $(ls "$SQL_DIR/migrations" | grep -E "^[0-9]+_${suffix}\.sql$" | sort); do
+        id="${file%%_*}"
+        known["$id"]=1
+        [ -n "${have[$id]:-}" ] && continue
+        root_sql "$db" <"$SQL_DIR/migrations/$file"
+        applied=$((applied + 1))
+    done
+    [ "$applied" = 0 ] || log "$db: applied $applied migration(s)"
+
+    unknown=0
+    for id in "${!have[@]}"; do
+        [ -n "${known[$id]:-}" ] || unknown=$((unknown + 1))
+    done
+    if [ "$unknown" != 0 ]; then
+        log "WARNING: $db has $unknown migration(s) this core does not know — the database is newer" \
+            "than vmangos $(cut -c1-9 "$SQL_DIR/core-commit"). Rebuild with a newer VMANGOS_COMMIT."
+    fi
+    unset have known
+done
+log "schema matches vmangos $(cut -c1-9 "$SQL_DIR/core-commit")"
+
+# ---- 4. the realm -------------------------------------------------------------------------------
+# realmd hands the client `address:port` for the world server, so they are what the phone must be
+# able to reach: this machine's LAN address and the published world port — not container names.
+case "$REALM_ADDRESS" in
+    *[!A-Za-z0-9.-]*) die "REALM_ADDRESS must be an IPv4 address or a hostname (got '$REALM_ADDRESS')" ;;
+esac
+[ "${#REALM_ADDRESS}" -le 32 ] || die "REALM_ADDRESS is longer than the 32 characters vmangos stores"
+[ "${#REALM_NAME}" -le 32 ] || die "REALM_NAME is longer than the 32 characters vmangos stores"
+case "$REALM_PORT" in '' | *[!0-9]*) die "REALM_PORT must be a number (got '$REALM_PORT')" ;; esac
+realm_type="$(realm_type_id)"
+name_sql="$(printf '%s' "$REALM_NAME" | sed -e 's/\\/\\\\/g' -e "s/'/''/g")"
+
+# realmflags 2 = offline until mangosd starts and clears it; timezone 1 = the "Development" realm
+# category, which every client locale lists.
+root_sql "$DB_REALMD" <<SQL
+INSERT INTO realmlist
+    (id, name, address, localAddress, localSubnetMask, port, icon, realmflags, timezone,
+     allowedSecurityLevel, population, gamebuild_min, gamebuild_max, flag, realmbuilds)
+VALUES
+    (1, '$name_sql', '$REALM_ADDRESS', '$REALM_ADDRESS', '255.255.255.0', $REALM_PORT,
+     $realm_type, 2, 1, 0, 0, 0, 0, 0, '')
+ON DUPLICATE KEY UPDATE
+    name = VALUES(name), address = VALUES(address), localAddress = VALUES(localAddress),
+    localSubnetMask = VALUES(localSubnetMask), port = VALUES(port), icon = VALUES(icon),
+    timezone = VALUES(timezone);
+SQL
+log "realm '$REALM_NAME' → $REALM_ADDRESS:$REALM_PORT (${REALM_TYPE:-pve})"
+
+accounts="$(root_sql -e 'SELECT COUNT(*) FROM account' "$DB_REALMD")"
+if [ "$accounts" = 0 ]; then
+    log "no accounts yet — once mangosd is up:"
+    log "  docker compose exec mangosd vmangos-console account create <name> <password>"
+fi
+log "done"

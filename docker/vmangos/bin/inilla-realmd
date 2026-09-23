@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# realmd: the logon server (port 3724). Config = upstream defaults + this stack + config/realmd.conf.
+set -euo pipefail
+INILLA_ROLE=realmd
+. /usr/local/bin/inilla-lib.sh
+check_db_password
+
+conf=/run/vmangos/realmd.conf
+cp /opt/vmangos/etc/realmd.conf.dist "$conf"
+conf_set "$conf" LoginDatabaseInfo "$(db_info "$DB_REALMD")"
+conf_set "$conf" LogsDir '"/vmangos/logs"'
+conf_set "$conf" BindIP '"0.0.0.0"'
+conf_set "$conf" RealmServerPort 3724
+conf_apply_overrides "$conf" /config/realmd.conf
+
+wait_for_db "$DB_USER" "$DB_PASSWORD"
+exec realmd -c "$conf"

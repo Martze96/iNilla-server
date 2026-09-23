@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# extract: turn the client's MPQs into the server data mangosd needs, once, then exit.
+#
+#   /client/Data   the 1.12.1 client's Data folder (read-only)
+#   /vmangos/data  the result: 5875/dbc, maps (always), vmaps (EXTRACT_VMAPS), mmaps (EXTRACT_MMAPS)
+#
+# Each step leaves a marker and is skipped on the next run, so this is a no-op on every start after
+# the first. Delete a marker (or the whole serverdata volume) to redo a step.
+set -euo pipefail
+INILLA_ROLE=extract
+. /usr/local/bin/inilla-lib.sh
+
+CLIENT=/client
+DATA=/vmangos/data
+EXTRACTORS=/opt/vmangos/bin/Extractors
+: "${EXTRACT_VMAPS:=1}"
+: "${EXTRACT_MMAPS:=0}"
+
+# The extractors open the archives by their stock names, and Linux cares about case.
+for mpq in dbc.MPQ model.MPQ terrain.MPQ texture.MPQ wmo.MPQ patch.MPQ; do
+    [ -f "$CLIENT/Data/$mpq" ] ||
+        die "$mpq is missing from the client Data folder — is WOW_DATA_DIR a 1.12.1 client's Data folder?"
+done
+
+mkdir -p "$DATA"
+cd "$DATA"
+elapsed() { printf '%dm%02ds' $((SECONDS / 60)) $((SECONDS % 60)); }
+
+# ---- dbc + maps ---------------------------------------------------------------------------------
+if [ -f .inilla-maps ]; then
+    log "dbc and maps: already extracted"
+else
+    log "extracting dbc and maps (a few minutes)…"
+    SECONDS=0
+    rm -rf dbc maps Cameras 5875/dbc
+    # -f 0: store heights as floats (the high-resolution maps).
+    MapExtractor -i "$CLIENT" -o "$DATA" -f 0 --silent
+    # mangosd reads the DBCs from DataDir/<build>/dbc/ but the maps straight from DataDir/maps/.
+    mkdir -p 5875
+    mv dbc 5875/dbc
+    [ -n "$(ls 5875/dbc)" ] || die "no DBC files were extracted"
+    [ -n "$(ls maps)" ] || die "no map files were extracted"
+    touch .inilla-maps
+    log "dbc and maps: $(ls 5875/dbc | wc -l) dbc files, $(ls maps | wc -l) map tiles in $(elapsed)"
+fi
+
+# ---- vmaps --------------------------------------------------------------------------------------
+buildings() {
+    log "extracting building and model geometry (VMapExtractor)…"
+    rm -rf Buildings
+    VMapExtractor -d "$CLIENT/Data" --silent
+    [ -f Buildings/dir_bin ] || die "VMapExtractor produced no Buildings/dir_bin"
+}
+
+if [ "$EXTRACT_VMAPS" != 1 ] && [ "$EXTRACT_MMAPS" = 1 ]; then
+    die "EXTRACT_MMAPS=1 needs EXTRACT_VMAPS=1 — movement maps are built from the vmaps"
+fi
+
+if [ "$EXTRACT_VMAPS" != 1 ]; then
+    log "vmaps: skipped (EXTRACT_VMAPS=$EXTRACT_VMAPS) — line of sight and indoor checks stay off"
+elif [ -f .inilla-vmaps ]; then
+    log "vmaps: already extracted"
+else
+    log "building vmaps (line of sight, heights; a few minutes)…"
+    SECONDS=0
+    buildings
+    rm -rf vmaps
+    mkdir -p vmaps
+    VMapAssembler Buildings vmaps --silent
+    [ -n "$(ls vmaps)" ] || die "VMapAssembler produced no vmaps"
+    touch .inilla-vmaps
+    log "vmaps: $(ls vmaps | wc -l) files in $(elapsed)"
+fi
+
+# ---- mmaps --------------------------------------------------------------------------------------
+if [ "$EXTRACT_MMAPS" != 1 ]; then
+    log "mmaps: skipped (EXTRACT_MMAPS=$EXTRACT_MMAPS) — creatures path in straight lines"
+elif [ -f .inilla-mmaps ]; then
+    log "mmaps: already generated"
+else
+    log "generating mmaps (creature pathing; this takes hours, on every core)…"
+    SECONDS=0
+    [ -f Buildings/dir_bin ] || buildings
+    cp "$EXTRACTORS/offmesh.txt" "$EXTRACTORS/config.json" .
+    mkdir -p mmaps
+    python3 "$EXTRACTORS/mmap_extract.py"
+    [ -n "$(ls mmaps)" ] || die "the mmap generator produced nothing"
+    touch .inilla-mmaps
+    log "mmaps: $(ls mmaps | wc -l) files in $(elapsed)"
+fi
+
+# Buildings/ is only the intermediate of vmaps and mmaps (and over a gigabyte).
+if [ -d Buildings ] && { [ "$EXTRACT_MMAPS" != 1 ] || [ -f .inilla-mmaps ]; }; then
+    rm -rf Buildings
+fi
+log "server data ready in $DATA"

@@ -1,0 +1,156 @@
+# iNilla backend: a vmangos 1.12.1 realm and the game-data host for the iNilla iOS app.
+#
+#   cp .env.example .env      # set WOW_DATA_DIR, REALM_ADDRESS and the secrets
+#   docker compose up -d
+#
+# The first `up` compiles vmangos (5–15 min), imports the world database and extracts the server's
+# map data from your client (a few minutes with vmaps). Every later `up` takes seconds.
+#
+# Published on BIND_ADDR (all interfaces by default), for the phone:
+#   3724  realmd    — logon (the app's server profile: host + this port)
+#   8085  mangosd   — world (handed out by realmd as REALM_ADDRESS:MANGOSD_PORT)
+#   8099  datahost  — the client's Data folder, for the app's one-time download
+# The database is never published.
+
+name: inilla
+
+x-vmangos: &vmangos
+  image: inilla-vmangos:${VMANGOS_COMMIT:-4b350a09fca8b5797975e343ae6300fbb5f9937b}
+  build:
+    context: .
+    dockerfile: docker/vmangos/Dockerfile
+    args:
+      VMANGOS_COMMIT: ${VMANGOS_COMMIT:-4b350a09fca8b5797975e343ae6300fbb5f9937b}
+      VMANGOS_DB_URL: ${VMANGOS_DB_URL:-}
+  init: true
+  environment: &db-env
+    DB_HOST: db
+    DB_PORT: "3306"
+    DB_USER: mangos
+    DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+    REALM_TYPE: ${REALM_TYPE:-pve}
+    TZ: ${TZ:-UTC}
+
+services:
+  db:
+    image: mariadb:11.4
+    restart: unless-stopped
+    # vmangos is old MaNGOS code: it relies on non-strict SQL (zero dates, silent truncation).
+    command:
+      - --sql-mode=NO_ENGINE_SUBSTITUTION
+      - --max-allowed-packet=256M
+      - --innodb-buffer-pool-size=512M
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?set DB_ROOT_PASSWORD in .env}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  # One-shot, on every `up`: databases, the release dump (first run), the core's new migrations,
+  # and the realm row from .env. Exits 0 when the database is ready.
+  db-init:
+    <<: *vmangos
+    restart: "no"
+    command: ["inilla-db-init"]
+    environment:
+      <<: *db-env
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?set DB_ROOT_PASSWORD in .env}
+      REALM_NAME: ${REALM_NAME:-iNilla}
+      REALM_ADDRESS: ${REALM_ADDRESS:?set REALM_ADDRESS in .env to this machine's LAN address}
+      REALM_PORT: ${MANGOSD_PORT:-8085}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # One-shot, on every `up`: dbc/maps/vmaps(/mmaps) from your client, the first time only.
+  extract:
+    <<: *vmangos
+    restart: "no"
+    command: ["inilla-extract"]
+    environment:
+      EXTRACT_VMAPS: ${EXTRACT_VMAPS:-1}
+      EXTRACT_MMAPS: ${EXTRACT_MMAPS:-0}
+    volumes:
+      - ${WOW_DATA_DIR:?set WOW_DATA_DIR in .env}:/client/Data:ro
+      - serverdata:/vmangos/data
+
+  realmd:
+    <<: *vmangos
+    restart: unless-stopped
+    command: ["inilla-realmd"]
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./config:/config:ro
+      - logs:/vmangos/logs
+    ports:
+      - "${BIND_ADDR:-0.0.0.0}:${REALMD_PORT:-3724}:3724"
+    healthcheck:
+      # Listening on 3724 (0x0E8C), read from /proc so the check does not open a connection that
+      # realmd would log every time.
+      test: ["CMD-SHELL", "grep -qi ':0E8C 00000000:0000 0A' /proc/net/tcp"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  mangosd:
+    <<: *vmangos
+    restart: unless-stopped
+    command: ["inilla-mangosd"]
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      extract:
+        condition: service_completed_successfully
+    volumes:
+      - ./config:/config:ro
+      - serverdata:/vmangos/data:ro
+      - logs:/vmangos/logs
+    ports:
+      - "${BIND_ADDR:-0.0.0.0}:${MANGOSD_PORT:-8085}:8085"
+    # mangosd saves every character on SIGTERM; never cut that short.
+    stop_grace_period: 2m
+    healthcheck:
+      # Listening on 8085 (0x1F95): mangosd opens the port once the world has loaded.
+      test: ["CMD-SHELL", "grep -qi ':1F95 00000000:0000 0A' /proc/net/tcp"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      # Loading the world takes a minute or two.
+      start_period: 5m
+
+  datahost:
+    image: inilla-datahost:local
+    build:
+      context: datahost
+    restart: unless-stopped
+    command: ["serve", "--data", "/client/Data", "--cache-dir", "/state"]
+    environment:
+      INILLA_DATA_TOKEN: ${INILLA_DATA_TOKEN:?set INILLA_DATA_TOKEN in .env}
+      INILLA_DATA_LOCALE: ${WOW_LOCALE:-enUS}
+    volumes:
+      - ${WOW_DATA_DIR:?set WOW_DATA_DIR in .env}:/client/Data:ro
+      - datahost:/state
+    ports:
+      - "${BIND_ADDR:-0.0.0.0}:${DATAHOST_PORT:-8099}:8099"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8099/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # The first start hashes the archives (a few minutes for 5 GB) before it listens.
+      start_period: 10m
+
+volumes:
+  db:
+  serverdata:
+  logs:
+  datahost:

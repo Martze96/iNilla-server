@@ -1,0 +1,9 @@
+# Machine-specific settings and secrets (database passwords, the data token).
+.env
+
+# Build output.
+datahost/target/
+
+# Never commit anything from a WoW install: the MPQ archives, or anything extracted from them.
+*.MPQ
+*.mpq
