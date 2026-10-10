@@ -15,12 +15,12 @@
 name: inilla
 
 x-vmangos: &vmangos
-  image: inilla-vmangos:${VMANGOS_COMMIT:-4b350a09fca8b5797975e343ae6300fbb5f9937b}
+  image: inilla-vmangos:${VMANGOS_COMMIT:-53d24d5c748bef5e0cde7b1155bcb3d979af614c}
   build:
     context: .
     dockerfile: docker/vmangos/Dockerfile
     args:
-      VMANGOS_COMMIT: ${VMANGOS_COMMIT:-4b350a09fca8b5797975e343ae6300fbb5f9937b}
+      VMANGOS_COMMIT: ${VMANGOS_COMMIT:-53d24d5c748bef5e0cde7b1155bcb3d979af614c}
       VMANGOS_DB_URL: ${VMANGOS_DB_URL:-}
   init: true
   environment: &db-env

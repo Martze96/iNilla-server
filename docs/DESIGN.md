@@ -72,7 +72,7 @@ still empty, then applies the core's `sql/migrations` that the database's `migra
 list yet. Every vmangos migration registers itself there, so this is exactly how vmangos expects an
 upgrade to go, and an existing realm moves forward with each new `VMANGOS_COMMIT` without re-importing.
 
-The pinned pair: core `4b350a09f` (2026-09-15) and the `db-13b49dc` snapshot (2026-09-06). At
+The pinned pair: core `53d24d5c7` (2026-10-07) and the `db-13b49dc` snapshot (2026-09-06). At
 that commit the core and the dump hold the same migrations (9 logon, 1140 world, 8 characters,
 7 logs). If a future snapshot is newer than the pinned core, `db-init` counts the unknown migrations
 and warns.
