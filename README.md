@@ -1,12 +1,11 @@
 <div align="center">
   <h1>iNilla — server</h1>
-  <p><b>A vmangos 1.12.1 realm and a game-data host for the iNilla iOS client, in one <code>docker compose up</code></b></p>
+  <p><b>A vmangos 1.12.1 realm and a game-data host for the <a href="https://github.com/Martze96/iNilla">iNilla iOS client</a>, in one <code>docker compose up</code></b></p>
 </div>
 
-***This is basically vmangos with an added endpoint to serve WoW 1.12.1 Data so that users don't need to transfer it themselves and instead just point iNilla to the endpoint*** 
+***This is basically vmangos with an added endpoint to serve WoW 1.12.1 Data so that users don't need to transfer it themselves and instead just point the [iNilla iOS client](https://github.com/Martze96/iNilla) to the endpoint.*** 
 
-**iNilla** is a World of Warcraft 1.12.1 client for the iPhone. This repository is its home
-network backend: everything the app needs from a machine on your LAN.
+[**iNilla**](https://github.com/Martze96/iNilla) is a World of Warcraft 1.12.1 client for the iPhone. This repository is its companion home-network backend: everything the iOS app needs from a machine on your LAN.
 
 | service | port | what the app uses it for |
 |---|---|---|
